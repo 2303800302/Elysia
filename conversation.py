@@ -168,7 +168,7 @@ def generate_chat_summary(log_file,max_entries=SUMMARY_ENTRIES_PER_FILE):
                 time_line = next((line for line in lines if line.startswith("时间：")),"")
                 user_line = next((line for line in lines if line.startswith("用户：")),"")
                 #next内置函数，用于获取生成器的下一个元素，第二个“”是默认值，没有符合条件元素就返回这个
-                 if time_line and user_line:
+                if time_line and user_line:
                      time_str = time_line.replace("时间：","").strip()
                      user_content = user_line.replace("用户：","").strip()
 
@@ -177,6 +177,118 @@ def generate_chat_summary(log_file,max_entries=SUMMARY_ENTRIES_PER_FILE):
                      summaries.append(f"{time_str}:{topic}")
 
         return "\n".join(summaries) # 用\n换行拼接summaries列表
+    except IOError as e: #出现保存或者读取错误，如文件不存在，读取权限不足
+        logger.error(f"读取日志文件出错：{e}")
+        return ""
+    except Exception as e: #exception是一个兜底万能错误，所以一般放最后
+        logger.error(f"生成摘要错误：{e}")
+        return ""
+
+def update_chat_summary_index():
+    """更新所有聊天日志的主题索引文件"""
+    try:
+        log_dir = get_chatlog_dir()
+        summary_file = os.path.join(log_dir,SUMMARY_FILE)
+
+        #加载索引元数据
+        metadata = load_index_metadata()
+        current_time = time.time()
+
+        #获取所有日志文件。 os.listdir作用是返回这个路径的文件和文件夹的名字的列表
+        log_files = [f for f in os.listdir(log_dir) if f.endswith(".txt") and f != SUMMARY_FILE and f != METADATA_FILE]
+
+        #按照修改时间排序（最新的在前面）os.getmtime返回指定路径最后修改时间
+        log_files.sort(key=lambda x: os.path.getmtime(os.path.join(log_dir,x), reverse=True))
+
+        # 检查哪些文件需要更新
+        files_to_process = []
+        for log_file in log_files: #这里log_files是个含文件和文件夹名的列表
+            file_path = os.path.join(log_dir,log_file)
+            mtime = os.path.getmtime(file_path)
+
+            #如果文件是新的或者已经修改
+            if log_file not in metadata["files"] or metadata["files"][log_file] < mtime:
+                files_to_process.append((log_files,file_path))
+                #更新文件元数据
+                metadata["files"][log_file] = mtime
+
+        #如果没有新文件或者更改，且距离上次更新未超过设定更新阈值，直接返回
+        if not files_to_process and (current_time - metadata["last_update"] < SUMMARY_UPDATE_INTERVAL):
+            logger.debug("没有新的对话日志需要处理，索引已经是最新")
+            return summary_file
+
+        #生成摘要内容
+        summary_content = f" 对话主题索引（更新时间：{get_current_datetime()}）\n\n"
+
+        #处理需要更新的文件
+        process_files = set()
+        for log_file, file_path in files_to_process:
+            date = log_file.replace(".txt","")
+            process_files.add(log_file)
+
+            summary_content += f"##{date}对话记录\n"
+            file_summary = generate_chat_summary(file_path)
+
+            if file_summary:
+                summary_content += file_summary + "\n\n"
+            else:
+                summary_content += "无效对话\n\n"
+
+        #添加未更改的文件内容（从现有摘要中获取）
+        if os.path.exists(summary_file):
+            try:
+                with open(summary_file,'r',encoding='utf-8') as f:
+                    old_content = f.read()
+
+                #从旧摘要中提取未更改的文件内容
+                for log_file in log_files:
+                    if log_file not in process_files:
+                        date = log_file.replace(".txt","")
+                        section_header = f"##{date}对话记录"
+
+                        if section_header in old_content:
+                            section_start = old_content.find(section_header)
+                            section_end = old_content.find("##",section_start + len(section_header))
+                            if section_end == -1:
+                                section_end = len(old_content)
+
+                                section_content = old_content[section_start:section_end].strip()
+                                if section_content:
+                                    summary_content += section_content + "\n\n"
+            except Exception as e:
+                logger.error(f"读取摘要出错：{e}")
+        #保存摘要文件
+        with open(summary_file,'w',encoding='utf-8') as f:
+            f.write(summary_content)
+
+        #更新元数据并保存
+        metadata["last_update"] = current_time
+        save_index_metadata(metadata)
+
+        logger.info(f"已更新对话主题索引：{summary_file}")
+        return summary_file
+    except Exception as e:
+        logger.error(f"更新主题索引出错{e}")
+
+def load_recent_chat_history(limit=MAX_HISTORY_ROUNDS):
+    """加载最近的聊天记录作为上下文"""
+    try:
+        #获取chatlog目录
+        log_dir = get_chatlog_dir()
+        if not os.path.exists(log_dir):
+            return []
+
+        #获取最新日志文件
+        today = get_current_data()
+        log_file = os.path.join(log_dir,f"{today}.txt")
+
+        if not os.path.exists(log_file):
+            return []
+
+
+
+
+
 
 
 
