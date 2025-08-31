@@ -6,6 +6,10 @@ import datetime
 import requests
 import traceback
 import logging
+
+from debugpy.common.log import log_dir
+from gensim.scripts.segment_wiki import segment
+
 from config import (DEEPSEEK_API_KEY,
                     MAX_HISTORY_ROUNDS,
                     TEMPERATYRE,MAX_TOKEN,
@@ -284,6 +288,73 @@ def load_recent_chat_history(limit=MAX_HISTORY_ROUNDS):
 
         if not os.path.exists(log_file):
             return []
+
+        #读取日志文件
+        with open(log_file,'r',encoding='utf-8') as f:
+            content = f.read()
+
+        #解析日志文件
+        history = []
+        segments = content.split("-"*50) #划分开是列表
+        for segment in segments[-limit-1,-1]: #获取最新的limit对话
+            if not segment.strip(): #去掉首尾符合是空白、
+                continue
+
+            lines = segment.strip().split("\n")
+            if len(lines) >= 3: #确保有时间，用户和娜迦的内容
+                user_line = next((line for line in lines if line.startswith("用户：")),"") #后面""是保证没有要寻找内容时返回空字符串，便面报错
+                naga_line = next((line for line in lines if line.startswith("娜迦：")),"")
+
+                if user_line and naga_line:
+                    user_content = user_line.replace("用户：","").strip()
+                    naga_content = naga_line.replace("娜迦：","").strip() #将对话开头去除，再将首尾符合去掉
+
+                    history.append({"role":"user","content":user_content})
+                    history.append({"role":"assistant","content":naga_content})
+
+            return history
+    except Exception as e:
+        logger.error(f"加载历史记录出错：{e}")
+        return []
+
+def get_chat_summary_content():
+    """获取主题摘要作为上下文参考"""
+    try:
+        log_dir = get_chatlog_dir()
+        summary_file = os.path.join(log_dir,SUMMARY_FILE)
+
+        #如果摘要文件不存在获取过期（超过一天），则更新
+        if not os.path.exists(summary_file) or \
+                (time.time() - os.path.getmtime(summary_file)) >
+                SUMMARY_UPDATE_INTERVAL: #1天=86400秒
+                update_chat_summary_index() #这个or后面的\是续行符
+
+        #读取摘要文件
+        if os.path.exists(summary_file):
+            with open(summary_file,'r',encoding='utf-8') as f:
+                return f.read()
+
+        return ""
+    except Exception as e:
+        logger.error(f"读取主题摘要时出错{e}")
+        return ""
+
+def ai_generate_topic_for_conversation(use_input,ai_response):
+    """AI根据对话内容生成主题"""
+    try:
+        #首先检查AI回复中是否已经包含标准格式的主题索引
+        topic_match = re.search(r"\[索引主题\]:(.*?)\[结束\]",ai_response)
+        if topic_match:
+            #如果AI回复中包含标准格式的主题索引，直接提取
+            topic = topic_match.group(1).strip()
+
+
+
+
+
+
+
+
 
 
 
