@@ -325,7 +325,7 @@ def get_chat_summary_content():
 
         #如果摘要文件不存在获取过期（超过一天），则更新
         if not os.path.exists(summary_file) or \
-                (time.time() - os.path.getmtime(summary_file)) >
+                (time.time() - os.path.getmtime(summary_file)) >\
                 SUMMARY_UPDATE_INTERVAL: #1天=86400秒
                 update_chat_summary_index() #这个or后面的\是续行符
 
@@ -343,10 +343,149 @@ def ai_generate_topic_for_conversation(use_input,ai_response):
     """AI根据对话内容生成主题"""
     try:
         #首先检查AI回复中是否已经包含标准格式的主题索引
-        topic_match = re.search(r"\[索引主题\]:(.*?)\[结束\]",ai_response)
+        topic_match = re.search(r"\[索引主题\]:(.*?)\[结束\]",ai_response)  #找到搜索内容，否则返回空
         if topic_match:
             #如果AI回复中包含标准格式的主题索引，直接提取
-            topic = topic_match.group(1).strip()
+            topic = topic_match.group(1).strip() #group函数是精准提取正则匹配中的特定部分
+            logger.debug(f"从AI回复中直接提取到主题1索引：{topic}")
+            return topic
+
+        #如果没有明确指示，调用API让AI生成主题总结
+        return _generate_ai_topic_summary(use_input,ai_response)
+    except Exception as e:
+        logger.error(f"生成主题出错{e}")
+        return use_input[:20] + "..."
+
+def _generate_ai_topic_summary(user_input,ai_response):
+    """调用API生成对话主题总结"""
+    try:
+        #首先检查AI回复中是否包含了标准格式的主题索引，直接提取
+        topic_match = re.search(r"\[索引主题\]：(.*?)\[结束\]",ai_response)
+        if topic_match:
+            #如果AI回复中已经包含了标准格式的主题索引，直接提取
+            topic = topic_match.group(1).strip() #针对group（）提取，看正则表达式中的括号排序，依次从左到右1，2，3（0是整个），如果有嵌套括号，也是从左到右，先大括号，再在大括号中的小括号从左到右。此处就是(.*?)
+            logger.debug(f"从AI回复中直接提取到主题索引：{topic}")
+            return topic
+
+        # 如果AI回复中没有包含标准格式的主题索引，调用API生成
+        prompt = f"""请根据以下对话，总结一个简洁的主题标题，使用15字以内。
+请在回复中包含主题索引，格式必须是：[索引主题]：你的主题内容[结束]
+
+可以这样回复：我认为这段对话的主题是[索引主题]：量子计算入门[结束]，希望对你有帮助。
+
+对话内容：
+用户: {user_input}
+AI: {ai_response}"""
+
+        #准备请求负载
+        api_url = "https://api.deepseek.com/v1/chat/completions"
+        #API 的地址，就像你要访问的网站 URL，这里是 DeepSeek 提供的聊天接口地址
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+        }
+        #         #请求的 “头部信息”，相当于给 API 的 “身份凭证” 和 “数据说明”：
+        # Content-Type: application/json 表示发送的是 JSON 格式的数据，API 需要按 JSON 解析。
+        # Authorization: Bearer {密钥} 是认证方式，DEEPSEEK_API_KEY 是用户在 DeepSeek 平台申请的 API 密钥（类似 “密码”，证明你有权限调用 API）。
+
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.5,
+            "max_tokens": 100
+        } # payload 是发送给API的具体任务指令
+
+        #发送API请求
+        logger.debug("正在生成对话主题总结...")
+        response = requests.post(api_url,headers=headers,json=payload)
+        response.raise_for_status() #检查请求是否成功，如果api返回错误会抛出异常
+        #requests.post()用requests库发送一个post请求（http的一种提交方式）
+        #第一个参数是请求地址
+        #第二个参数是前面定义的请求头
+        #第三个参数会自动把payload转换为json格式发送
+
+        #解析响应
+        resp_data = response.json() #API 的回复通常是 JSON 格式的字符串，这个方法会把它转换成 Python 字典（resp_data），方便提取数据。
+
+        if "choices" in resp_data and len(resp_data["choices"]) > 0:
+            ai_content = resp_data["choices"][0]["message"]["content"].strip()
+
+            #使用正则表达式匹配标准格式 "[索引主题]: xxx[结束]"
+            match = re.search(r"\[索引主题\]: (.*?)\[结束\]",ai_content)
+            if match:
+                topic = match.group(1).strip()
+                #限制长度
+                if len(topic) > 20:
+                    topic = topic[:20] + "..."
+
+                logger.debug(f"AI生成的标准格式主题：{topic}")
+                return topic
+            else:
+                # 未能匹配到标准格式，尝试提取整个回复作为主题
+                logger.warning(f"AI回复未按照标准格式：{ai_content}")
+                #提取回复的前20个字作为主题
+                topic = ai_content[:20] + ("..." if len(ai_content)> 20 else "")
+                return topic
+        else:
+            logger.error(f"AI生成主题失败，使用默认主题")
+            return user_input[:20] + "..."
+    except Exception as e:
+        logger.error(f"调用API生成主题时出错：{e}")
+        return user_input[:20] + "..."
+
+def _refine_topic_name(topic,user_input,ai_response):
+    """优化索引1主题名称，使其更精确和有意义
+
+    采用通用算法提取关键概念，不依赖特定领域词汇
+    """
+    if not topic: #如果是空，即topic是空字符串
+        return topic
+
+    #检查主题是否过于模糊
+    vague_terms = ['系统',"功能","记录","版本","更新","讨论","分析","概述"]
+    is_vague = all(term in vague_terms for term in topic.split() if len(term)>1) #查看是否所有的次都在vague_terms里面，返回true
+
+    if is_vague:
+        # 2，对话中提取可能的关键术语
+        #提取引号中的内容作为可能的关键术语
+        quoted_terms = re.findall(r'["\'](.*?)["\']',user_input + " " + ai_response)
+        project_terms = []
+
+        #寻找可能的项目名称（通常是名词+系统/功能/模块等）
+        project_pattern = re.compile(r'([A-Za-z\u4e00-\u9fa5]{1,10}(?:系统|功能|模块|项目|计划|框架|平台))')
+        project_matches = project_pattern.findall(user_input + " " + ai_response)
+        if project_matches:
+            project_terms.extend(project_matches)
+
+        #3. 如果找到关键术语，将他们添加到主题中
+        for term in quoted_terms + project_terms:
+            if term and term not in topic and len(term) > 1:
+                if any(vague in topic for vague in vague_terms):
+                    #替换模糊术语
+                    for vague in vague_terms:
+                        if vague in topic:
+                            return topic.replace(vague,term)
+
+                else:
+                    #添加为前缀
+                    return f"{term}{topic}"
+
+    #4. 移除冗余词汇
+    redundant_pairs = [
+        ("系统功能","系统"),
+        ("功能功能", "功能"),
+        ("模块模块", "模块")
+
+    ]
+
+    result = topic
+    for pair in redundant_pairs:
+        result = result.replace(pair[0],pair[1])
+
+    return result
+
+
+
 
 
 
