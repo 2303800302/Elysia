@@ -9,6 +9,7 @@ import logging
 
 from debugpy.common.log import log_dir
 from gensim.scripts.segment_wiki import segment
+from imageio.config.plugins import summary
 
 from config import (DEEPSEEK_API_KEY,
                     MAX_HISTORY_ROUNDS,
@@ -443,7 +444,7 @@ def _refine_topic_name(topic,user_input,ai_response):
 
     #检查主题是否过于模糊
     vague_terms = ['系统',"功能","记录","版本","更新","讨论","分析","概述"]
-    is_vague = all(term in vague_terms for term in topic.split() if len(term)>1) #查看是否所有的次都在vague_terms里面，返回true
+    is_vague = all(term in vague_terms for term in topic.split() if len(term)>1) #查看是否所有的词都在vague_terms里面，返回true，判定为模糊
 
     if is_vague:
         # 2，对话中提取可能的关键术语
@@ -452,13 +453,13 @@ def _refine_topic_name(topic,user_input,ai_response):
         project_terms = []
 
         #寻找可能的项目名称（通常是名词+系统/功能/模块等）
-        project_pattern = re.compile(r'([A-Za-z\u4e00-\u9fa5]{1,10}(?:系统|功能|模块|项目|计划|框架|平台))')
-        project_matches = project_pattern.findall(user_input + " " + ai_response)
+        project_pattern = re.compile(r'([A-Za-z\u4e00-\u9fa5]{1,10}(?:系统|功能|模块|项目|计划|框架|平台))') #re.compile() 函数通过将正则表达式字符串转换为正则表达式对象
+        project_matches = project_pattern.findall(user_input + " " + ai_response) #这里得到的就是["拉普拉斯系统","帕拉蒂斯计划","格里芬平台",...]等
         if project_matches:
             project_terms.extend(project_matches)
 
         #3. 如果找到关键术语，将他们添加到主题中
-        for term in quoted_terms + project_terms:
+        for term in quoted_terms + project_terms: #quoted里面是引号重点内容，project是关键词内容
             if term and term not in topic and len(term) > 1:
                 if any(vague in topic for vague in vague_terms):
                     #替换模糊术语
@@ -483,6 +484,149 @@ def _refine_topic_name(topic,user_input,ai_response):
         result = result.replace(pair[0],pair[1])
 
     return result
+
+def ai_update_topic_index(user_input,ai_response,date=None,force_update=False):
+    """AI自动更新主题索引"""
+    try:
+        #获取对话计数
+        dialog_count = get_dialog_count()
+
+        #如果对话次数少于阈值且非强制更新，则跳过
+        if dialog_count < INDEX_DIALOG_THRESHOLD and not force_update:
+            logger.debug(f"[AI索引]当前对话次数({dialog_count})未达到更新阈值({INDEX_DIALOG_THRESHOLD},跳过索引更新)")
+            return False
+
+        #获取日期
+        date = date or get_current_data()
+
+        #检查是否已经添加过该对话
+        if is_session_indexed(user_input,ai_response,date) and not force_update:
+            logger.debug(f"[AI索引]该对话已添加到索引中，跳过")
+            return False
+
+        #生成主题
+        topic = ai_generate_topic_for_conversation(user_input,ai_response)
+
+        #优化主题名称使其更精确
+        refined_topic = _refine_topic_name(topic,user_input,ai_response)
+        if refined_topic != topic:
+            logger.info(f"主题优化：'{topic}' ➡'{refined_topic}'")
+            topic = refined_topic
+
+        #获取摘要文件路径
+        log_dir = get_chatlog_dir()
+        summary_file = os.path.join(log_dir,SUMMARY_FILE)
+
+        # 读取现有摘要文件
+        try:
+            if os.path.exists(summary_file):
+                with open(summary_file,'r',encoding='utf-8') as f:
+                    summary_content = f.read()
+            else:
+                summary_content = ""
+        except IOError as e:
+            logger.error(f"读取摘要文件出错：{e}")
+            summary_content = ""
+
+        #如果文件为空或者不存在，创建基本结构
+        if not summary_content:
+            summary_content = f"#对话主题索引（更新时间：{get_current_datetime()})\n\n"
+
+        # 更新索引内容
+        return _update_summary_content(summary_file, summary_content, date, topic, force_update)
+
+    except Exception as e:
+        logger.error(f"AI更新主题索引时出错{e}")
+        return False
+
+def _update_summary_content(summary_file,summary_content,date,topic,force_update=False):
+    """更新摘要内容并写入文件"""
+    try:
+        # 当前时间
+        time_now = get_current_time()
+        date_section = f"##{date} 对话记录"
+        new_topic_entry = f"{time_now}:{topic}"
+
+        #如果存在当天记录，添加新条目
+        if date_section in summary_content:
+            #查看当前记录部分
+            section_start = summary_content.find(date_section) #find找到指定字符串第一个出现位置，并返回其位置的索引。没找到会返回-1
+            section_end = summary_content.find("##",section_start + len(date_section)) #确定正文的结束边界（##），从date_section之后找
+            if section_end == -1:
+                section_end = len(summary_content)
+
+            section_content = summary_content[
+                section_start:section_end].strip() #当天记录的核心正文分割
+            updated_section = section_content + '\n' + new_topic_entry
+            #将新的主题条目添加到当天记录，然后更新成新记录
+
+            #更新摘要内容,把摘要中间部分换了
+            summary_content = summary_content[:section_start] +updated_section + "\n\n" + summary_content[section_end:]
+        else:
+            #创建新部分并插入到第一个章节前
+            new_section = f"{date_section}\n{new_topic_entry}\n\n"
+            first_section = summary_content.find("##")
+            if first_section != -1:
+                summary_content = summary_content[:first_section] + new_section + summary_content[first_section:]
+            else:
+                #没有章节
+                summary_content += new_section
+
+        #更新标题中时间戳
+        summary_content = re.sub(
+            r'# 对话主题索引 \(更新时间*?\)',
+            f'# 对话主题索引 (更新时间：{get_current_datetime()})',
+            summary_content
+        )
+        #re.sub() 是用于替换字符串中符合正则表达式模式的内容的核心函数。它的本质是：在目标字符串中查找所有匹配正则模式的子串，并用指定的内容替换它们，最终返回替换后的新字符串（原字符串不会被修改）。
+
+        #写入文件
+        with open(summary_file,'w',encoding='utf-8') as f:
+            f.write(summary_content)
+
+        #更新元数据
+        metadata = load_index_metadata()
+        metadata['last_update'] = time.time()
+        save_index_metadata(metadata)
+
+        action_type = '强制更新' if force_update else "自动更新"
+        logger.info(f'[AI{action_type}]已写入主题「{topic}」到索引')
+        return True
+    except IOError as e:
+        logger.error(f"[AI索引写入文件失败：{e}]")
+        return False
+
+def _sanitize_ai_response(ai_message,is_context_search=False):
+    """处理AI回复内容，防止在检索模式下误触发索引更新
+
+    Args：
+        ai_message: AI回复内容
+        is_context_search: 是否处于上下文检索模式
+
+    Returns:
+        处理后的回复内容
+    """
+    if not is_context_search:
+        return ai_message
+
+    #在检索模式下，替换可能触发索引的标准格式
+    #这些替换只在系统检测到用户正在进行上下文检索时进行
+
+    #检查是否包含标准索引格式
+    if re.search(r'\[索引主题\]：(.*?)\[结束、]',ai_message):
+        #替换标准格式为安全格式
+        ai_message = re.sub(
+            r'\[索引主题\]：(.*?)\[结束\]',
+            ai_message
+        )
+        logger.info("检测到AI在检索模式下使用标准索引格式，以替换为安全格式")
+
+    return ai_message
+
+def
+
+
+
 
 
 
