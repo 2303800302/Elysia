@@ -10,6 +10,7 @@ import logging
 from debugpy.common.log import log_dir
 from gensim.scripts.segment_wiki import segment
 from imageio.config.plugins import summary
+from sphinx.builders.gettext import timestamp
 
 from config import (DEEPSEEK_API_KEY,
                     MAX_HISTORY_ROUNDS,
@@ -623,7 +624,94 @@ def _sanitize_ai_response(ai_message,is_context_search=False):
 
     return ai_message
 
-def
+def interact_with_deepseek(messages,include_history=True):
+    """
+    与DeepSeek API交互，获取AI响应
+
+    Arg:
+        message:消息列表
+        include_history:是否包含历史上下文
+    Return：
+        更新后的消息列表
+    """
+    global _last_index_time, _last_index_topic
+    try:
+        #主备要发送的消息列表
+        if include_history:
+            #检查用户最后一条消息是否包含日期时间引用模式
+            user_messages = ""
+            is_timestamp_query = False
+            is_context_search = False
+            timestamp_contexts = []
+            last_ai_message = ""
+
+        #获取用户最后的输入和AI上一次的回复
+        for i,msg in enumerate(reversed(messages)): #先反向遍历，再给索引
+            if msg['role'] == 'user' and not user_messages:
+                user_messages = msg['content']
+            elif msg['role'] == 'assistant' and not last_ai_message:
+                last_ai_message = msg['content']
+            if user_messages and last_ai_message:
+                break
+
+        #检测用户是否在确认查看AI提到的时间戳对话
+        #前缀 r 表示这是一个原始字符串，作用是让字符串中的反斜杠 \ 不被解释为转义字符。
+        #^：表示匹配字符串的开头（必须从字符串第一个字符开始匹配）
+        #$：表示匹配字符串的结尾（必须匹配到字符串最后一个字符）
+        #?：量词符号表示前面的字符可以出现 0 次或 1 次（可选）
+        confirmation_patterns = [
+            r'^要$',r'^是$',r'^确认$',r'^好的?$',r'^同意$',r'^继续$',r'^ok$',r'^okay$',r'^可以$',r'^请继续$',r'^继续查看$',
+        ]
+
+        user_confirming = any(re.search(pattern,user_messages.lower()) for pattern in confirmation_patterns) #任何一个匹配成功就true
+
+        #检查AI上一次回复中是否包含时间戳
+        ai_timestamp_matches = []
+        if last_ai_message:
+            ai_timestamp_matches = re.findall(r'(\d{4}-\d{2}-\d{2})?\s?(\d{2}:\d{2}:\d{2})',last_ai_message) #返回的是包含时间的列表
+
+        #如果用户是在确认，且AI上一次回复中包含时间戳，则认为是在查询该时间戳对话
+        if user_confirming and ai_timestamp_matches:
+            is_timestamp_query = True
+            logger.info(f"检测用户确认查看AI提到的时间戳对话")
+
+            for date_str, time_str in ai_timestamp_matches:
+                # 如果没有提供日期，传递None让函数搜索所有日志文件
+                if not date_str: #如果没有日期(为空)
+                    date_str = None
+
+                #加载指定时间戳附近的聊天记录
+                context_history = load_chat_by_timestamp(date_str,time_str)
+                if context_history:
+                    timestamp_contexts.extend(context_history)
+                    date_info = date_str if date_str else "自动检测"
+                    logger.info(f"已加载AI提到的时间戳{date_info}{time_str}的上下文")
+                else:
+                    #如果未找到，尝试将上次搜索到的结果作为主题进行匹配
+                    summary_file = os.path.join(get_chatlog_dir(),SUMMARY_FILE)
+                    if os.path.exists(summary_file):
+                        try:
+                            with open(summary_file,'r',encoding='utf-8') as f:
+                                summary_content = f.read()
+
+                            #查找提到该时间戳附近的对话主题
+                            time_pattern = time_str.replace(":",r"\:")
+                            #转义冒号用于正则
+                            time_context = re.search(r'(\d{4}-\d{2}-\d{2})?.?' + time_pattern + r'.{0,100}',summary_content) #. 默认不匹配换行
+                            #想允许日期和时间之间出现空白或 T（并且允许换行）：把 .? 改成 (?:\s|T)?（\s 含空格、Tab、换行等）
+                            if time_context:
+                                context_line = time_context.group(0)
+                                #此时context_line是re.search出的对象，type是<class 're.Match'>.所以使用group（0）将其转换为字符串
+
+
+
+
+
+
+
+
+
+
 
 
 
