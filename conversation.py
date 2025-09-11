@@ -14,7 +14,7 @@ from sphinx.builders.gettext import timestamp
 
 from config import (DEEPSEEK_API_KEY,
                     MAX_HISTORY_ROUNDS,
-                    TEMPERATYRE,MAX_TOKEN,
+                    TEMPERATURE,MAX_TOKENS,
                     SUMMARY_ENTRIES_PER_FILE,
                     SUMMARY_UPDATE_INTERVAL,
                     LOG_DIR,
@@ -319,7 +319,7 @@ def load_recent_chat_history(limit=MAX_HISTORY_ROUNDS):
         logger.error(f"加载历史记录出错：{e}")
         return []
 
-def get_chat_summary_content():
+def get_chat_summary_context():
     """获取主题摘要作为上下文参考"""
     try:
         log_dir = get_chatlog_dir()
@@ -624,84 +624,230 @@ def _sanitize_ai_response(ai_message,is_context_search=False):
 
     return ai_message
 
-def interact_with_deepseek(messages,include_history=True):
+
+def interact_with_deepseek(messages, include_history=True):
     """
     与DeepSeek API交互，获取AI响应
 
-    Arg:
-        message:消息列表
-        include_history:是否包含历史上下文
-    Return：
+    Args:
+        messages: 消息列表
+        include_history: 是否包含历史上下文
+
+    Returns:
         更新后的消息列表
     """
     global _last_index_time, _last_index_topic
     try:
-        #主备要发送的消息列表
+        # 准备要发送的消息列表
         if include_history:
-            #检查用户最后一条消息是否包含日期时间引用模式
-            user_messages = ""
+            # 检查用户最后一条消息是否包含日期时间引用模式
+            user_message = ""
             is_timestamp_query = False
             is_context_search = False
             timestamp_contexts = []
             last_ai_message = ""
 
-        #获取用户最后的输入和AI上一次的回复
-        for i,msg in enumerate(reversed(messages)): #先反向遍历，再给索引
-            if msg['role'] == 'user' and not user_messages:
-                user_messages = msg['content']
-            elif msg['role'] == 'assistant' and not last_ai_message:
-                last_ai_message = msg['content']
-            if user_messages and last_ai_message:
-                break
+            # 获取用户最后的输入和AI上一次的回复
+            for i, msg in enumerate(reversed(messages)):
+                if msg["role"] == "user" and not user_message:
+                    user_message = msg["content"]
+                elif msg["role"] == "assistant" and not last_ai_message:
+                    last_ai_message = msg["content"]
+                if user_message and last_ai_message:
+                    break
 
-        #检测用户是否在确认查看AI提到的时间戳对话
-        #前缀 r 表示这是一个原始字符串，作用是让字符串中的反斜杠 \ 不被解释为转义字符。
-        #^：表示匹配字符串的开头（必须从字符串第一个字符开始匹配）
-        #$：表示匹配字符串的结尾（必须匹配到字符串最后一个字符）
-        #?：量词符号表示前面的字符可以出现 0 次或 1 次（可选）
-        confirmation_patterns = [
-            r'^要$',r'^是$',r'^确认$',r'^好的?$',r'^同意$',r'^继续$',r'^ok$',r'^okay$',r'^可以$',r'^请继续$',r'^继续查看$',
-        ]
+            # 检测用户是否在确认查看AI提到的时间戳对话
+            confirmation_patterns = [
+                r'^要$', r'^是$', r'^确认$', r'^好的?$', r'^同意$', r'^继续$',
+                r'^ok$', r'^okay$', r'^可以$', r'^请继续$', r'^继续查看$'
+            ]
 
-        user_confirming = any(re.search(pattern,user_messages.lower()) for pattern in confirmation_patterns) #任何一个匹配成功就true
+            user_confirming = any(re.search(pattern, user_message.lower()) for pattern in confirmation_patterns)
 
-        #检查AI上一次回复中是否包含时间戳
-        ai_timestamp_matches = []
-        if last_ai_message:
-            ai_timestamp_matches = re.findall(r'(\d{4}-\d{2}-\d{2})?\s?(\d{2}:\d{2}:\d{2})',last_ai_message) #返回的是包含时间的列表
+            # 检查AI上一次回复中是否包含时间戳
+            ai_timestamp_matches = []
+            if last_ai_message:
+                ai_timestamp_matches = re.findall(r'(\d{4}-\d{2}-\d{2})?\s?(\d{2}:\d{2}:\d{2})', last_ai_message)
 
-        #如果用户是在确认，且AI上一次回复中包含时间戳，则认为是在查询该时间戳对话
-        if user_confirming and ai_timestamp_matches:
-            is_timestamp_query = True
-            logger.info(f"检测用户确认查看AI提到的时间戳对话")
+            # 如果用户是在确认，且AI上一次回复中包含时间戳，则认为是在查询该时间戳对话
+            if user_confirming and ai_timestamp_matches:
+                is_timestamp_query = True
+                logger.info(f"检测到用户确认查看AI提到的时间戳对话")
 
-            for date_str, time_str in ai_timestamp_matches:
-                # 如果没有提供日期，传递None让函数搜索所有日志文件
-                if not date_str: #如果没有日期(为空)
-                    date_str = None
+                for date_str, time_str in ai_timestamp_matches:
+                    # 如果没有提供日期，传递None让函数搜索所有日志文件
+                    if not date_str:
+                        date_str = None
 
-                #加载指定时间戳附近的聊天记录
-                context_history = load_chat_by_timestamp(date_str,time_str)
-                if context_history:
-                    timestamp_contexts.extend(context_history)
-                    date_info = date_str if date_str else "自动检测"
-                    logger.info(f"已加载AI提到的时间戳{date_info}{time_str}的上下文")
-                else:
-                    #如果未找到，尝试将上次搜索到的结果作为主题进行匹配
-                    summary_file = os.path.join(get_chatlog_dir(),SUMMARY_FILE)
-                    if os.path.exists(summary_file):
-                        try:
-                            with open(summary_file,'r',encoding='utf-8') as f:
-                                summary_content = f.read()
+                    # 加载指定时间戳附近的聊天记录
+                    context_history = load_chat_by_timestamp(date_str, time_str)
+                    if context_history:
+                        timestamp_contexts.extend(context_history)
+                        date_info = date_str if date_str else "自动检测"
+                        logger.info(f"已加载AI提到的时间戳 {date_info} {time_str} 的上下文")
+                    else:
+                        # 如果未找到，尝试将上次搜索到的结果作为主题进行匹配
+                        summary_file = os.path.join(get_chatlog_dir(), SUMMARY_FILE)
+                        if os.path.exists(summary_file):
+                            try:
+                                with open(summary_file, "r", encoding="utf-8") as f:
+                                    summary_content = f.read()
 
-                            #查找提到该时间戳附近的对话主题
-                            time_pattern = time_str.replace(":",r"\:")
-                            #转义冒号用于正则
-                            time_context = re.search(r'(\d{4}-\d{2}-\d{2})?.?' + time_pattern + r'.{0,100}',summary_content) #. 默认不匹配换行
-                            #想允许日期和时间之间出现空白或 T（并且允许换行）：把 .? 改成 (?:\s|T)?（\s 含空格、Tab、换行等）
-                            if time_context:
-                                context_line = time_context.group(0)
-                                #此时context_line是re.search出的对象，type是<class 're.Match'>.所以使用group（0）将其转换为字符串
+                                # 查找提到该时间戳附近的对话主题
+                                time_pattern = time_str.replace(":", r"\:")  # 转义冒号用于正则
+                                time_context = re.search(r'(\d{4}-\d{2}-\d{2})?.?' + time_pattern + r'.{0,100}',
+                                                         summary_content)
+                                if time_context:
+                                    context_line = time_context.group(0)
+                                    logger.info(f"在索引中找到时间戳相关信息: {context_line}")
+                                    payload_messages.append({
+                                        "role": "system",
+                                        "content": f"虽然未能找到完整对话，但在历史索引中找到了相关信息: {context_line}"
+                                    })
+                            except Exception as e:
+                                logger.error(f"查找时间戳索引信息时出错: {e}")
+
+            # 检测是否是上下文检索请求
+            if not is_timestamp_query:  # 如果不是时间戳确认，再检查其他模式
+                context_search_patterns = [
+                    r'查找.*?对话',
+                    r'找到.*?聊天记录',
+                    r'检索.*?记录',
+                    r'查看.*?对话',
+                    r'回忆.*?对话',
+                    r'回看.*?聊天',
+                    r'之前.*?说过',
+                    r'之前.*?讨论',
+                    r'之前.*?提到'
+                ]
+
+                for pattern in context_search_patterns:
+                    if re.search(pattern, user_message):
+                        is_context_search = True
+                        logger.info("检测到上下文检索请求")
+                        break
+
+                # 检测用户消息中的日期时间引用 (格式: YYYY-MM-DD HH:MM:SS 或 HH:MM:SS)
+                timestamp_matches = re.findall(r'(\d{4}-\d{2}-\d{2})?\s?(\d{2}:\d{2}:\d{2})', user_message)
+                if timestamp_matches:
+                    is_timestamp_query = True
+
+                    for date_str, time_str in timestamp_matches:
+                        # 如果没有提供日期，使用当前日期
+                        if not date_str:
+                            date_str = get_current_date()
+
+                        # 加载指定时间戳附近的聊天记录
+                        context_history = load_chat_by_timestamp(date_str, time_str)
+                        if context_history:
+                            timestamp_contexts.extend(context_history)
+                            logger.info(f"已加载时间戳 {date_str} {time_str} 的上下文")
+
+            # 加载最近的对话历史作为上下文
+            chat_history = load_recent_chat_history()
+
+            # 获取当前系统提示
+            system_prompt = None
+            for msg in messages:
+                if msg["role"] == "system":
+                    system_prompt = msg
+                    break
+
+            # 如果没有系统提示，创建一个
+            if not system_prompt:
+                system_prompt = {"role": "system", "content": "你是一个有记忆和总结能力的AI助手。"}
+                messages.insert(0, system_prompt)
+
+            # 添加有关索引引用格式的指导
+            if is_context_search or is_timestamp_query:
+                # 在检索模式下，提供特殊指导，避免触发索引机制
+                reference_guide = """
+重要：当引用历史对话的索引主题时，请使用以下格式，而不要使用[索引主题]：xxx[结束]格式：
+1. 「主题：xxx」
+
+例如，应该使用：
+- 根据历史记录「主题：量子计算入门」，而不是 [索引主题]：量子计算入门[结束]
+- 我在「主题：夏园记忆系统启用纪念」对话中发现...
+- 历史记录中「主题：多平台服务接口测试」显示...
+"""
+                system_prompt["content"] = system_prompt["content"].split("\n\n")[0] + "\n\n" + reference_guide
+
+            # 获取索引摘要上下文
+            summary_context = get_chat_summary_context()
+            if summary_context and not is_context_search and not is_timestamp_query:  # 在检索模式下不添加索引摘要
+                # 将索引摘要添加到系统提示中
+                system_prompt["content"] += f"\n\n当前主题索引:\n{summary_context}"
+
+            # 添加当前对话计数信息到系统提示
+            current_count = get_dialog_count()
+
+            # 只有在非检索模式下才添加对话计数和索引信息
+            if not is_context_search and not is_timestamp_query:
+                dialog_info = f"\n\n当前会话信息: 对话次数={current_count + 1}/{INDEX_DIALOG_THRESHOLD}"
+                if current_count + 1 >= INDEX_DIALOG_THRESHOLD:
+                    dialog_info += "（达到索引阈值，请考虑生成主题索引）"
+                system_prompt["content"] += dialog_info
+                logger.debug(f"添加会话计数信息: {dialog_info}")
+
+            # 构建完整的消息列表：系统提示 + 时间戳上下文(如果有) + 历史上下文 + 当前对话
+            payload_messages = []
+
+            # 1. 添加系统提示
+            for msg in messages:
+                if msg["role"] == "system":
+                    payload_messages.append(msg)
+                    break
+
+            # 2. 添加时间戳上下文(如果有)
+            if timestamp_contexts:
+                # 添加分隔提示
+                payload_messages.append({
+                    "role": "system",
+                    "content": f"以下是{'AI提到的' if user_confirming else '用户请求的'}时间戳附近的聊天记录:"
+                })
+                payload_messages.extend(timestamp_contexts)
+                payload_messages.append({
+                    "role": "system",
+                    "content": "以上是历史对话记录，请基于这些信息回答用户的当前问题。记住，引用历史索引时不要使用[索引主题]格式。"
+                })
+            elif not is_timestamp_query:
+                # 3. 添加历史上下文(仅在非时间戳查询模式下)
+                payload_messages.extend(chat_history)
+
+            # 4. 添加当前对话(除了系统提示外的最新消息)
+            for msg in messages:
+                if msg["role"] != "system" and msg not in chat_history:
+                    payload_messages.append(msg)
+        else:
+            # 不包含历史，只使用当前消息
+            payload_messages = messages
+
+        # 准备请求负载
+        api_url = "https://api.deepseek.com/v1/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+        }
+
+        payload = {
+            "model": "deepseek-chat",
+            "messages": payload_messages,
+            "temperature": TEMPERATURE,
+            "max_tokens": MAX_TOKENS
+        }
+
+        # 发送API请求
+        logger.info('\n正在调用DeepSeek API...')
+        response = requests.post(api_url,headers=headers,json=payload)
+        response.raise_for_status() # 检测访问是否成功的函数
+
+        # 解析响应
+        resp_data = response.json() # 从json格式转换为python字典格式抓换
+
+        if 'choices' in resp_data and len(resp_data['choices']) > 0:
+            ai_message = resp_data[]
+
+
 
 
 

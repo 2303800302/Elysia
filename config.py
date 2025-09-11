@@ -6,8 +6,8 @@ DEEPSEEK_API_KEY = ''
 
 #对话相关配置
 MAX_HISTORY_ROUNDS = 5  #最多保留的历史对话轮数
-TEMPERATYRE = 0.7       #生成文本的随机性（0-1）
-MAX_TOKEN = 2000        #生成文本的最大长度
+TEMPERATURE = 0.7       #生成文本的随机性（0-1）
+MAX_TOKENS = 2000        #生成文本的最大长度
 
 #索引相关配置
 SUMMARY_ENTRIES_PER_FILE = 10   #每个日志文件提取的最大主题数
