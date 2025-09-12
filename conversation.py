@@ -840,12 +840,19 @@ def interact_with_deepseek(messages, include_history=True):
         logger.info('\n正在调用DeepSeek API...')
         response = requests.post(api_url,headers=headers,json=payload)
         response.raise_for_status() # 检测访问是否成功的函数
+        #requests.post() 方法发送一个 HTTP POST 请求到 api_url，携带 headers 和 payload。这个请求会把数据发送到 DeepSeek 服务器，并等待其响应。
 
         # 解析响应
         resp_data = response.json() # 从json格式转换为python字典格式抓换
 
         if 'choices' in resp_data and len(resp_data['choices']) > 0:
-            ai_message = resp_data[]
+            ai_message = resp_data['choices'][0]['message']['content']
+
+            # 获取用户输入
+            user_input = messages[-1]['content'] if len(messages) >= 1 else ''
+
+            # 检测是否为上下文检索或时间戳查询模式
+            is_context_query = re.search()
 
 
 
