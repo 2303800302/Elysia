@@ -7,10 +7,7 @@ import requests
 import traceback
 import logging
 
-from debugpy.common.log import log_dir
-from gensim.scripts.segment_wiki import segment
-from imageio.config.plugins import summary
-from sphinx.builders.gettext import timestamp
+
 
 from config import (DEEPSEEK_API_KEY,
                     MAX_HISTORY_ROUNDS,
@@ -735,7 +732,7 @@ def interact_with_deepseek(messages, include_history=True):
                     for date_str, time_str in timestamp_matches:
                         # 如果没有提供日期，使用当前日期
                         if not date_str:
-                            date_str = get_current_date()
+                            date_str = get_current_data()
 
                         # 加载指定时间戳附近的聊天记录
                         context_history = load_chat_by_timestamp(date_str, time_str)
@@ -852,7 +849,226 @@ def interact_with_deepseek(messages, include_history=True):
             user_input = messages[-1]['content'] if len(messages) >= 1 else ''
 
             # 检测是否为上下文检索或时间戳查询模式
-            is_context_query = re.search()
+            is_context_query = re.search(re.search(p, user_input) for p in [r'查找.*?对话', r'找到.*?聊天记录', r'检索.*?记录',
+                r'查看.*?对话', r'回忆.*?对话', r'回看.*?聊天',
+                r'之前.*?说过', r'之前.*?讨论', r'之前.*?提到'])
+
+            is_timestamp_query = re.search(r'(\d{4}-\d{2}-\d{2})?\s?(\d{2}:\d{2}:\d{2})',user_input) is not None
+
+            # 检测是否是AI提到时间戳的确认回复
+            if len(messages) >= 3: # 确保足够多的消息历史
+                last_ai_response = messages[-2]['content'] if messages[-2]['role'] == 'assistant' else ''
+                user_confirmation = any(re.search(p,user_input).lower() for p in [r'^要$', r'^是$', r'^确认$', r'^好的?$', r'^同意$', r'^继续$',
+                    r'^ok$', r'^okay$', r'^可以$', r'^请继续$', r'^继续查看$'])
+
+                if user_confirmation and re.search(r'\d{2}:\d{2}:\d{2}',last_ai_response):
+                    is_timestamp_query = True
+                    logger.info("检测到用户确认查看AI提到的时间戳对话")
+
+            # 如果处于上下文检索模式，处理AI回复，避免误触索引
+            if is_context_search or is_timestamp_query:
+                ai_message = _sanitize_ai_response(ai_message,True)
+
+            # 只在非检索模式下增加对话计数
+            if not is_context_search and not is_timestamp_query:
+                current_count = increment_dialog_counter()
+
+                # 检查是否应该更新索引
+                should_update = False
+                force_update = False
+
+                # 条件1：对话次数达到阈值
+                if current_count >= INDEX_DIALOG_THRESHOLD:
+                    should_update = True
+                    reset_dialog_counter() # 重置计数器
+                    logger.info(f'对话次数达到阈值（{INDEX_DIALOG_THRESHOLD}），触发索引更新')
+
+                # 条件2：AI回复中包含特定格式的索引标记
+                topic_match = re.search(r'\[索引主题\]：(.*?)\[结束\]',ai_message)
+                if topic_match:
+                    current_topic = topic_match.group(1).strip()
+                    current_time = time.time()
+
+                    # 检查时间间隔和主题相似度
+                    time_diff = current_time - _last_index_time
+
+                    # 如果距离上次索引时间太短且主题相似，则跳过
+                    if time_diff < _MIN_INDEX_INTERVAL and (_last_index_topic == current_topic or current_topic in _last_index_topic or _last_index_topic in current_topic):
+                        logger.info(f'跳过相似主题索引，间隔仅{time_diff:.0f}秒：{current_topic}')
+                    else:
+                        should_update = True
+                        force_update = True
+                        _last_index_topic = current_topic
+                        _last_index_time = current_time
+
+                # 执行索引更新
+                if should_update and len(messages) >= 2:
+                    ai_update_topic_index(user_input,ai_message,force_update=force_update)
+
+            return messages
+        else:
+            logger.error(f'API响应中未找到choices：{resp_data}')
+            messages.append({'role':'assistant','content':"抱歉，爱莉的魔法失效了，请等一会再来吧"})
+            return messages
+
+    except Exception as e:
+        logger.error(f'与DeepSeek API交互时出错：{str(e)}')
+        traceback.print_exc() #  会把当前正在处理的异常的**完整回溯（traceback / stack trace）**打印出来，默认输出到标准错误流（sys.stderr）
+        messages.append({'role':'assistant','content':'抱歉，发生了一个小错误，请稍后再尝试'})
+        return messages
+
+def load_chat_by_timestamp(date, time_str, context_size=30):
+    """根据日期和时间戳加载特定时间附近的聊天记录
+    Args:
+        :param date:  日期字符串（YYYY-MM-DD）,如果为None则会在所有日志文件中搜索
+        :param time_str:时间字符串（HH:MM:SS）
+        :param context_size30:返回的上下文大小（时间点前后各半数）
+
+    Returns:
+        包含上下文对话的列表
+    """
+    try:
+        # 获取日志文件
+        log_dir = get_chatlog_dir()
+
+        # 如果提供了特定日期，优先检查该日期的文件
+        if date:
+            log_file = os.path.join(log_dir,f'{date}.txt')
+
+            if os.path.exists(log_file):
+                history = _load_chat_from_file(log_file,time_str,context_size)
+                if history:
+                    return history
+                logger.warning(f'在指定日期{date}的文件中找不到时间戳：{time_str}')
+
+        # 如果没有提供日期或在指定日期文件中未找到，则搜索所有日志文件
+        log_files = [f for f in os.listdir(log_dir) if f.endswith('.txt') and f != SUMMARY_FILE and f != METADATA_FILE]
+
+        # 按修改时间排序（最新的在前）
+        log_files.sort(key=lambda x: os.path.getmtime(os.path.join(log_dir,x)),reverse=True)
+
+        # 从最新的文件开始搜索
+        for log_file_name in log_files:
+            file_date = log_file_name.replace('.txt','') # 将文件名改成时间
+            # 跳过已经检查过的日期文件
+            if date and file_date == date:
+                continue
+
+            log_file = os.path.join(log_dir,log_file_name)
+            history = _load_chat_from_file(log_file, time_str,context_size)
+
+            if history:
+                logger.info(f'在日期{file_date}的文件中找到了时间戳{time_str}的对话')
+                return history
+
+        logger.warning(f'在所有日志文件中都找不到时间戳：{time_str}')
+        return []
+    except Exception as e:
+        logger.error(f'加载时间戳对话记录时出错：{e}')
+        return []
+
+def _load_chat_from_file(log_file, time_str, context_size=30):
+    """从指定文件中加载特定时间附近的聊天记录
+    Args：
+        :param log_file: 日志文件路径
+        :param time_str: 时间字符串（HH:MM:SS）
+        :param context_size:返回的上下文大小
+
+    Return:
+        包含上下文对话的列表，如果未找到则返回空列表
+    """
+    try:
+        # 提取文件日期
+        file_name = os.path.basename(log_file) # 去除路径，只提取文件的名字，这里就是(日期.txt)
+        file_date = file_name.replace('.txt','')
+
+        # 读取日志文件
+        with open(log_file,'r',encoding='utf-8') as f:
+            content = f.read()
+
+        # 分割对话片段
+        segments = content.split('-'*50)
+        segments = [s.strip for s in segments if s.strip()]
+
+        # 查找对话片段
+        target_idx = -1
+        for i, segment in enumerate(segments):
+            lines = segment.strip().split('\n')
+            time_line = next((line for line in lines if line.startswith("时间：")),'') # 迭代器，把满足条件的拿出来，否则为空
+            if time_line and time_str in time_line:
+                target_idx = i
+                break
+        if target_idx == -1:
+            # 如果没有精确匹配，尝试近似匹配
+            time_obj = datetime.datetime.strftime(time_str,'%H:%M:%S') #第一个datatime是模块名，第二个datetime是调用的类，第三个是函数。作用是将time_str字符串格式转化为datetime.datetime格式
+            best_diff = float('inf')
+
+            for i, segment in enumerate(segments):
+                lines = segment.strip().split('\n')
+                time_line = next((line for line in lines if line.startswith('时间：')),'')
+                if time_line:
+                    # 提取时间部分
+                    segment_time = time_line.replace('时间：','').strip()
+                    if " " in segment_time: # 如果包含日期和时间
+                        segment_time = segment_time.split(" ")[1] # 获取时间部分
+
+                    try:
+                        segment_time_obj = datetime.datetime.strptime(segment_time,'%H:%M:%S')
+                        # 计算时间差（秒）
+                        time_diff = abs((segment_time_obj - time_obj)).total_second()
+                        if time_diff < best_diff:
+                            best_diff = time_diff
+                            target_idx = i
+                    except ValueError:
+                        continue
+            if target_idx == -1 or best_diff > 3600: # 如果最佳匹配超过1小时，认为无匹配
+                return []
+
+        # 计算上下文的开始和结束索引
+        half_size = context_size // 2
+        star_idx = max(0,target_idx - half_size)
+        end_idx = min(len(segments), target_idx + half_size + 1)
+
+        # 提取上下文对话
+        history = []
+        for i in range(star_idx,end_idx):
+            segment =segments[i]
+            lines = segment.strip().split('\n')
+            if len(lines) >= 3: # 确保有时间，用户和娜迦的内容
+                time_line = next((line for line in lines if line.startswith("时间：")),'')
+                user_line = next((line for line in lines if line.starswith('用户：')),'')
+                naga_line = next((line for line in lines if line.starswith('娜迦：')),'')
+
+                if time_line and user_line and naga_line:
+                    time_content = time_line.replace("时间: ", "").strip()
+                    user_content = user_line.replace("用户: ", "").strip()
+                    naga_content = naga_line.replace("娜迦: ", "").strip()
+
+                    # 特殊标记当前目标对话
+                    if i == target_idx:
+                        prefix = '【目标对话】' if i == target_idx else ''
+                        history.append({'role':'system','content':f'{prefix}时间：{time_content}(来自{file_date})'}
+                                       )
+
+                    history.append({'role':'user','content':user_content})
+                    history.append({'role':'assistant','content':naga_content})
+
+        if history:
+            logger.info(f'已加载时间戳{time_str}附近的{len(history)//2}条对话记录 (来自{file_date})')
+            return history
+        return []
+    except Exception as e:
+        logger.error(f'从文件{log_file}加载对话记录是出错：{e}')
+        return []
+
+
+
+
+
+
+
+
+
 
 
 
